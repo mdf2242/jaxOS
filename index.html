@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Jax Render Engine: OS Interpolator</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+            background-color: #9b72a6; /* Physical Lilac Border */
+            font-family: monospace;
+            touch-action: none; /* Prevent browser scrolling on swipe */
+        }
+        canvas { display: block; }
+
+        #override-btn {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            padding: 20px 40px; font-size: 24px; font-weight: bold;
+            background-color: #FFD700; color: #000; border: 4px solid #000;
+            cursor: pointer; z-index: 10; text-transform: uppercase;
+            box-shadow: 8px 8px 0px #000; transition: all 0.1s ease;
+        }
+        #override-btn:active { transform: translate(-46%, -46%); box-shadow: 4px 4px 0px #000; }
+
+        #ui-container {
+            position: absolute; bottom: 20px; left: 20px;
+            background-color: rgba(0, 0, 0, 0.7); border: 2px solid #FFD700;
+            border-radius: 8px; padding: 10px; display: flex; align-items: center;
+            gap: 15px; z-index: 20; color: #FFF; box-shadow: 4px 4px 0px rgba(0,0,0,0.5);
+        }
+        .ui-btn {
+            background-color: #333; color: #FFD700; border: 2px solid #FFD700;
+            font-size: 20px; font-family: monospace; font-weight: bold; cursor: pointer;
+            padding: 5px 15px; border-radius: 4px; transition: all 0.1s;
+        }
+        .ui-btn:active { background-color: #FFD700; color: #000; }
+        #mood-label { font-size: 18px; font-weight: bold; min-width: 220px; text-align: center; text-shadow: 1px 1px 0 #000; }
+        #status-overlay {
+            position: absolute; top: 20px; width: 100%; text-align: center; color: #FFF; 
+            font-family: monospace; z-index: 5; pointer-events: none; font-size: 1.2rem; text-shadow: 2px 2px 0 #000;
+        }
+
+        /* --- AUDIO CALIBRATION UI --- */
+        #calib-panel {
+            position: absolute; bottom: 20px; right: 20px;
+            background-color: rgba(0, 0, 0, 0.8); border: 2px solid #FFD700;
+            border-radius: 8px; padding: 15px; color: #FFF; font-family: monospace;
+            z-index: 20; display: flex; flex-direction: column; gap: 10px;
+            box-shadow: 4px 4px 0px rgba(0,0,0,0.5); transition: opacity 0.2s;
+        }
+        .slider-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        .slider-row input[type=range] { accent-color: #FFD700; width: 120px; cursor: pointer; }
+        .slider-val { color: #FFD700; font-weight: bold; width: 40px; text-align: right; }
+        .calib-title { color: #FFD700; font-weight: bold; border-bottom: 1px solid #555; padding-bottom: 5px; margin-bottom: 5px; text-align: center; letter-spacing: 1px; }
+        .hidden-prod { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="status-overlay">Awaiting Handshake</div>
+    <button id="override-btn">Initialize Jax.OS</button>
+    
+    <div id="ui-container">
+        <button class="ui-btn" id="btn-prev">&lt;</button>
+        <div id="mood-label">THE SMIRK</div>
+        <button class="ui-btn" id="btn-next">&gt;</button>
+    </div>
+
+    <!-- CALIBRATION PANEL -->
+    <div id="calib-panel">
+        <div class="calib-title">AUDIO SYSTEM</div>
+        <div class="slider-row" title="Filters out fan noise/crowds">
+            <label>GATE</label>
+            <input type="range" id="gate-slider" min="0" max="50" step="1" value="4">
+            <span id="gate-val" class="slider-val">4</span>
+        </div>
+        <div class="slider-row" title="threshold for max state">
+            <label>THRESHOLD</label>
+            <input type="range" id="sens-slider" min="10" max="200" step="1" value="80">
+            <span id="sens-val" class="slider-val">80</span>
+        </div>
+    </div>
+
+    <canvas id="jaxCanvas"></canvas>
+
+    <script>
+        // --- ENVIRONMENT ROUTER (Dev vs Prod) ---
+        const urlParams = new URLSearchParams(window.location.search);
+        const isDevMode = urlParams.get('mode') === 'dev';
+
+        const canvas = document.getElementById('jaxCanvas');
+        const ctx = canvas.getContext('2d');
+        const btn = document.getElementById('override-btn');
+        const statusOverlay = document.getElementById('status-overlay');
+        const uiContainer = document.getElementById('ui-container');
+        const moodLabel = document.getElementById('mood-label');
+        const calibPanel = document.getElementById('calib-panel');
+        
+        const gateSlider = document.getElementById('gate-slider');
+        const sensSlider = document.getElementById('sens-slider');
+        const gateValLabel = document.getElementById('gate-val');
+        const sensValLabel = document.getElementById('sens-val');
+
+        // --- LOAD CALIBRATION FROM HARDWARE STORAGE ---
+        let audioGate = parseFloat(localStorage.getItem('jax_audioGate')) || 4.0;
+        let audioSens = parseFloat(localStorage.getItem('jax_audioSens')) || 80.0;
+
+        gateSlider.value = audioGate;
+        sensSlider.value = audioSens;
+        gateValLabel.innerText = audioGate;
+        sensValLabel.innerText = audioSens;
+
+        gateSlider.addEventListener('input', (e) => {
+            audioGate = parseFloat(e.target.value);
+            gateValLabel.innerText = audioGate;
+            localStorage.setItem('jax_audioGate', audioGate);
+        });
+
+        sensSlider.addEventListener('input', (e) => {
+            audioSens = parseFloat(e.target.value);
+            sensValLabel.innerText = audioSens;
+            localStorage.setItem('jax_audioSens', audioSens);
+        });
+
+        // Prod Mode: Eradicate the UI
+        if (!isDevMode) {
+            btn.style.display = 'none';
+            statusOverlay.style.display = 'none';
+            uiContainer.style.display = 'none';
+            calibPanel.classList.add('hidden-prod');
+        }
+
+        let audioContext, analyser, dataArray;
+        let micActive = false;
+        let micAttempted = false;
+        let smoothedVolume = 0; 
+        let wakeLock = null; // The Insomnia Tether
+
+        // --- THE JAX OS DATA STRUCTURE ---
+        const MOODS = [
+            {
+                name: "THE SMIRK", segments: 2, numTeeth: 7,
+                state1: [
+                    [40, 110], [100, 95], [200, 85], [260, 90],
+                    [260, 90], [240, 180], [80, 180], [40, 110]
+                ],
+                state2: [
+                    [30, 90], [100, 110], [200, 110], [270, 90], 
+                    [270, 90], [270, 210], [30, 210], [30, 90]
+                ]
+            },
+            {
+                name: "THE FROWN", segments: 2, numTeeth: 7,
+                state1: [
+                    [40, 140], [80, 30], [220, 30], [260, 140],
+                    [260, 140], [200, 120], [100, 120], [40, 140]
+                ],
+                state2: [
+                    [40, 130], [100, 30], [200, 30], [260, 130],
+                    [260, 130], [220, 180], [80, 180], [40, 130]
+                ]
+            },
+            {
+                name: "THE 'O'", segments: 4, numTeeth: 4, dynamicSpikes: true,
+                state1: [ 
+                    [110, 100], [115, 70], [132.5, 60], [150, 62.5], 
+                    [150, 62.5], [167.5, 65], [185, 80], [190, 100], 
+                    [190, 100], [185, 140], [167.5, 155], [150, 152.5], 
+                    [150, 152.5], [132.5, 150], [115, 130], [110, 100]  
+                ],
+                state2: [
+                    [40, 100], [40, 20], [120, 80], [150, 80],
+                    [150, 80], [180, 80], [260, 20], [260, 100],
+                    [260, 100], [260, 180], [180, 120], [150, 120],
+                    [150, 120], [120, 120], [40, 180], [40, 100]
+                ]
+            },
+            {
+                name: "THE SQUINT", segments: 2, numTeeth: 6,
+                state1: [
+                    [30, 100], [100, 130], [200, 70], [270, 100],
+                    [270, 100], [200, 150], [100, 140], [30, 100]
+                ],
+                state2: [
+                    [40, 150], [120, 150], [200, 50], [260, 50],
+                    [260, 50], [280, 150], [100, 200], [40, 150]
+                ]
+            }
+        ];
+
+        let currentMoodIdx = 0;
+
+        // PRE-CALCULATION: Dynamically generate "State 0" (Closed Mouth)
+        MOODS.forEach(mood => {
+            mood.state0 = JSON.parse(JSON.stringify(mood.state1));
+            if (mood.segments === 2) {
+                mood.state0[1][1] = mood.state0[6][1] = (mood.state1[1][1] + mood.state1[6][1]) / 2;
+                mood.state0[2][1] = mood.state0[5][1] = (mood.state1[2][1] + mood.state1[5][1]) / 2;
+            } else if (mood.segments === 4) {
+                const midY = (mood.state1[3][1] + mood.state1[11][1]) / 2;
+                mood.state0[3][1] = mood.state0[4][1] = mood.state0[11][1] = mood.state0[12][1] = midY;
+                mood.state0[1][1] = mood.state0[14][1] = (mood.state1[1][1] + mood.state1[14][1]) / 2;
+                mood.state0[2][1] = mood.state0[13][1] = (mood.state1[2][1] + mood.state1[13][1]) / 2;
+                mood.state0[5][1] = mood.state0[10][1] = (mood.state1[5][1] + mood.state1[10][1]) / 2;
+                mood.state0[6][1] = mood.state0[9][1] = (mood.state1[6][1] + mood.state1[9][1]) / 2;
+            }
+        });
+
+        function prevMood() {
+            currentMoodIdx = (currentMoodIdx - 1 + MOODS.length) % MOODS.length;
+            if (isDevMode) moodLabel.innerText = MOODS[currentMoodIdx].name;
+        }
+
+        function nextMood() {
+            currentMoodIdx = (currentMoodIdx + 1) % MOODS.length;
+            if (isDevMode) moodLabel.innerText = MOODS[currentMoodIdx].name;
+        }
+
+        // --- AUDIO HANDSHAKE & INSOMNIA CORE ---
+        async function initAudio() {
+            if (micAttempted) return;
+            micAttempted = true;
+
+            // 1. Fullscreen Hijack
+            try {
+                if (document.documentElement.requestFullscreen) {
+                    await document.documentElement.requestFullscreen();
+                }
+            } catch (err) {
+                console.warn("Fullscreen denied by OS. The border illusion may be compromised.", err);
+            }
+
+            // 2. Screen Wake Lock
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log("Hardware tethered. Display locked awake.");
+                }
+            } catch (err) {
+                console.warn("Wake Lock denied. Ensure the hardware is charging or override OS sleep settings.", err);
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                micActive = true;
+                if (isDevMode) statusOverlay.innerText = "MIC ACTIVE: Speak to animate";
+            } catch (err) {
+                micActive = false;
+                if (isDevMode) statusOverlay.innerHTML = "MIC BLOCKED.<br>Falling back to Auto-Demo Math.";
+            }
+        }
+
+        // --- THE VISIBILITY TRAP ---
+        // Re-arm the Wake Lock if Android tries to murder it in the background
+        document.addEventListener('visibilitychange', async () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') {
+                try {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log("Wake Lock re-armed after OS interruption.");
+                } catch (err) {
+                    console.warn("Failed to re-arm Wake Lock.", err);
+                }
+            }
+        });
+
+        // --- EVENT LISTENERS ---
+        // Dev Mode Click UI
+        document.getElementById('btn-prev').addEventListener('click', prevMood);
+        document.getElementById('btn-next').addEventListener('click', nextMood);
+        btn.addEventListener('click', async () => {
+            btn.style.display = 'none';
+            await initAudio();
+        });
+
+        // Prod Mode Swipe UI
+        if (!isDevMode) {
+            let touchStartX = 0;
+            let tapCount = 0;
+            let tapTimeout;
+
+            window.addEventListener('touchstart', (e) => {
+                touchStartX = e.changedTouches[0].screenX;
+                
+                // Secret Triple Tap Protocol to reveal calibration in Prod
+                tapCount++;
+                clearTimeout(tapTimeout);
+                tapTimeout = setTimeout(() => tapCount = 0, 400);
+                if (tapCount >= 3) {
+                    calibPanel.classList.toggle('hidden-prod');
+                    tapCount = 0;
+                }
+            });
+            
+            window.addEventListener('touchend', async (e) => {
+                if (!micAttempted) await initAudio(); // The Invisible Handshake
+                
+                let touchEndX = e.changedTouches[0].screenX;
+                let deltaX = touchEndX - touchStartX;
+                
+                if (deltaX < -50) nextMood();       // Swipe Left
+                else if (deltaX > 50) prevMood();   // Swipe Right
+            });
+        }
+
+        function resizeCanvas() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+        window.addEventListener('resize', resizeCanvas); resizeCanvas();
+
+        // Math Helpers
+        function lerp(start, end, amt) { return (1 - amt) * start + amt * end; }
+        function lerpArray(arr1, arr2, amt) {
+            return arr1.map((pt, i) => [lerp(pt[0], arr2[i][0], amt), lerp(pt[1], arr2[i][1], amt)]);
+        }
+        function getBezierPoint(t, p0, p1, p2, p3) {
+            const u = 1 - t;
+            const x = (u*u*u)*p0[0] + 3*(u*u)*t*p1[0] + 3*u*(t*t)*p2[0] + (t*t*t)*p3[0];
+            const y = (u*u*u)*p0[1] + 3*(u*u)*t*p1[1] + 3*u*(t*t)*p2[1] + (t*t*t)*p3[1];
+            return [x, y];
+        }
+
+        // --- THE ENGINE LOOP ---
+        function renderLoop() {
+            requestAnimationFrame(renderLoop);
+
+            let normalizedVolume = 0;
+            if (micActive) {
+                analyser.getByteFrequencyData(dataArray);
+                let sum = 0; for(let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+                let rawAvg = sum / dataArray.length;
+                
+                // Apply dynamic Gate and Sensitivity parameters
+                if (rawAvg < audioGate) {
+                    normalizedVolume = 0;
+                } else {
+                    normalizedVolume = Math.min(1.0, rawAvg / audioSens);
+                }
+                
+            } else if (micAttempted && isDevMode) {
+                // Only run auto-demo math if mic failed AND we are in dev mode
+                normalizedVolume = (Math.sin(Date.now() / 150) + 1) / 2; 
+                if (Math.sin(Date.now() / 1000) > 0.5) normalizedVolume = 0; 
+            } else {
+                // Waiting for handshake, sit perfectly still at closed state
+                normalizedVolume = 0;
+            }
+
+            smoothedVolume = lerp(smoothedVolume, normalizedVolume, 0.2);
+
+            ctx.fillStyle = '#9b72a6';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const mood = MOODS[currentMoodIdx];
+            
+            let currentPoints;
+            if (smoothedVolume < 0.5) {
+                const phaseAmt = smoothedVolume * 2; 
+                currentPoints = lerpArray(mood.state0, mood.state1, phaseAmt);
+            } else {
+                const phaseAmt = (smoothedVolume - 0.5) * 2;
+                currentPoints = lerpArray(mood.state1, mood.state2, phaseAmt);
+            }
+
+            // ASPECT RATIO OPTIMIZATION
+            const screenAspect = canvas.width / canvas.height;
+            const baseAspect = 300 / 200; 
+            if (screenAspect > baseAspect) {
+                const stretchX = (screenAspect / baseAspect) * 0.9;
+                currentPoints = currentPoints.map(pt => [
+                    150 + (pt[0] - 150) * stretchX, 
+                    pt[1]
+                ]);
+            }
+
+            const scale = Math.min(canvas.width / 300, canvas.height / 200) * 0.9;
+            const offsetX = (canvas.width - (300 * scale)) / 2;
+            const wobbleY = Math.sin(Date.now() / 800) * 10;
+            const offsetY = ((canvas.height - (200 * scale)) / 2) + wobbleY;
+
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(scale, scale);
+
+            // --- THE 3-PASS INSET SHADOW HACK (Option C - Refined) ---
+            ctx.beginPath();
+            ctx.moveTo(currentPoints[0][0], currentPoints[0][1]);
+            for(let i = 0; i < mood.segments; i++) {
+                let p = i * 4;
+                ctx.bezierCurveTo(currentPoints[p+1][0], currentPoints[p+1][1], currentPoints[p+2][0], currentPoints[p+2][1], currentPoints[p+3][0], currentPoints[p+3][1]);
+            }
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            
+            ctx.fillStyle = '#FFD700';
+            ctx.fill();
+
+            ctx.save();
+            ctx.clip(); 
+            ctx.shadowColor = 'rgba(0,0,0,0.9)';
+            ctx.shadowOffsetX = 0; 
+            ctx.shadowOffsetY = 0; 
+            ctx.shadowBlur = 25;   
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 4; 
+            
+            ctx.stroke(); 
+            ctx.stroke(); 
+            ctx.stroke(); 
+            ctx.restore();
+
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 4; 
+            ctx.stroke();
+
+            // --- INTERNAL GRID ---
+            ctx.save();
+            ctx.clip(); 
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 3; 
+
+            if (smoothedVolume > 0.02) {
+                const n = mood.numTeeth;
+                for(let i = 1; i < n; i++) {
+                    let t = i / n; 
+                    let topPt, botPt;
+
+                    if (mood.segments === 2) {
+                        topPt = getBezierPoint(t, currentPoints[0], currentPoints[1], currentPoints[2], currentPoints[3]);
+                        botPt = getBezierPoint(1-t, currentPoints[4], currentPoints[5], currentPoints[6], currentPoints[7]); 
+                    } else if (mood.segments === 4) {
+                        if (t < 0.5) {
+                            let tSub = t * 2;
+                            topPt = getBezierPoint(tSub, currentPoints[0], currentPoints[1], currentPoints[2], currentPoints[3]);
+                            botPt = getBezierPoint(1-tSub, currentPoints[12], currentPoints[13], currentPoints[14], currentPoints[15]);
+                        } else {
+                            let tSub = (t - 0.5) * 2;
+                            topPt = getBezierPoint(tSub, currentPoints[4], currentPoints[5], currentPoints[6], currentPoints[7]);
+                            botPt = getBezierPoint(1-tSub, currentPoints[8], currentPoints[9], currentPoints[10], currentPoints[11]);
+                        }
+                    }
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(topPt[0], topPt[1]);
+                    ctx.lineTo(botPt[0], botPt[1]);
+                    ctx.stroke();
+                }
+
+                ctx.beginPath();
+                if (mood.segments === 2) {
+                    let biteCP1X = lerp(currentPoints[1][0], currentPoints[6][0], 0.4);
+                    let biteCP1Y = lerp(currentPoints[1][1], currentPoints[6][1], 0.4);
+                    let biteCP2X = lerp(currentPoints[2][0], currentPoints[5][0], 0.4);
+                    let biteCP2Y = lerp(currentPoints[2][1], currentPoints[5][1], 0.4);
+
+                    ctx.moveTo(currentPoints[0][0], currentPoints[0][1]); 
+                    ctx.bezierCurveTo(biteCP1X, biteCP1Y, biteCP2X, biteCP2Y, currentPoints[3][0], currentPoints[3][1]); 
+                } else if (mood.segments === 4) {
+                    if (mood.dynamicSpikes && smoothedVolume > 0.5) {
+                        let numSpikes = 10;
+                        let startX = currentPoints[0][0];
+                        let startY = currentPoints[0][1];
+                        let endX = currentPoints[7][0]; 
+                        let endY = currentPoints[7][1];
+                        
+                        ctx.moveTo(startX, startY);
+                        for(let j = 1; j <= numSpikes; j++) {
+                            let t = j / numSpikes;
+                            let spikeX = lerp(startX, endX, t);
+                            let spikeY = lerp(startY, endY, t);
+                            
+                            if (j < numSpikes) {
+                                let intensity = (smoothedVolume - 0.5) * 80; 
+                                spikeY += (j % 2 === 0 ? intensity : -intensity);
+                            }
+                            ctx.lineTo(spikeX, spikeY);
+                        }
+                    } else {
+                        let biteMidX = lerp(currentPoints[3][0], currentPoints[11][0], 0.4);
+                        let biteMidY = lerp(currentPoints[3][1], currentPoints[11][1], 0.4);
+                        ctx.moveTo(currentPoints[0][0], currentPoints[0][1]);
+                        ctx.quadraticCurveTo(biteMidX, biteMidY, currentPoints[7][0], currentPoints[7][1]);
+                    }
+                }
+                ctx.stroke();
+            }
+
+            ctx.restore(); 
+            ctx.restore(); 
+        }
+
+        // Start the idle rendering loop immediately
+        renderLoop();
+    </script>
+</body>
+</html>
